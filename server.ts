@@ -93,14 +93,6 @@ async function startServer() {
     next();
   });
 
-  const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
-    message: "Too many requests from this IP, please try again later.",
-    validate: { xForwardedForHeader: false }
-  });
-  app.use("/api/", limiter);
-
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
     cors: { origin: "*", methods: ["GET", "POST"] },

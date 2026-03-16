@@ -23,6 +23,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [roomId, setRoomId] = useState<string | null>(null);
+  const roomIdRef = useRef<string | null>(null);
   const [isTyping, setIsTyping] = useState(false);
   const [partnerTyping, setPartnerTyping] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
@@ -52,6 +53,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
     setStatus("waiting");
     setMessages([]);
     setRoomId(null);
+    roomIdRef.current = null;
     setRemoteStream(null);
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
@@ -79,6 +81,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
     socket.on("match_found", async (data: { roomId: string; partnerId: string; initiator: boolean }) => {
       setStatus("matched");
       setRoomId(data.roomId);
+      roomIdRef.current = data.roomId;
       isInitiatorRef.current = data.initiator;
       partnerReadyRef.current = false;
       iceCandidateQueue.current = [];
@@ -134,7 +137,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
         try {
           const offer = await peerConnectionRef.current.createOffer();
           await peerConnectionRef.current.setLocalDescription(offer);
-          socket.emit("offer", { offer, roomId });
+          socket.emit("offer", { offer, roomId: roomIdRef.current });
         } catch (e) {
           console.error("Error creating offer", e);
         }
@@ -146,7 +149,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
-      socket.emit("answer", { answer, roomId });
+      socket.emit("answer", { answer, roomId: roomIdRef.current });
       processIceQueue();
     });
 
@@ -182,7 +185,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
       socket.off("answer");
       socket.off("ice_candidate");
     };
-  }, [socket, mode, roomId]);
+  }, [socket, mode]);
 
   const processIceQueue = async () => {
     if (!peerConnectionRef.current || !peerConnectionRef.current.remoteDescription) return;
@@ -234,11 +237,11 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
         await pc.setLocalDescription(offer);
         socket.emit("offer", { offer, roomId: currentRoomId });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error accessing media devices.", err);
       setMessages((prev) => [
         ...prev,
-        { id: "sys-err", text: "Could not access camera/microphone.", sender: "me", timestamp: new Date().toISOString() },
+        { id: "sys-err", text: `Camera/Mic error: ${err.message || err}`, sender: "me", timestamp: new Date().toISOString() },
       ]);
     }
   };
@@ -264,27 +267,27 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
   // Chat functions
   const sendMessage = (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || !roomId) return;
+    if (!input.trim() || !roomIdRef.current) return;
 
     const msg = input.trim();
-    socket.emit("send_message", { message: msg, roomId });
+    socket.emit("send_message", { message: msg, roomId: roomIdRef.current });
     setMessages((prev) => [
       ...prev,
       { id: Date.now().toString(), text: msg, sender: "me", timestamp: new Date().toISOString() },
     ]);
     setInput("");
     setIsTyping(false);
-    socket.emit("typing", { isTyping: false, roomId });
+    socket.emit("typing", { isTyping: false, roomId: roomIdRef.current });
   };
 
   const handleTyping = (e: ChangeEvent<HTMLInputElement>) => {
     setInput(e.target.value);
-    if (!isTyping && e.target.value && roomId) {
+    if (!isTyping && e.target.value && roomIdRef.current) {
       setIsTyping(true);
-      socket.emit("typing", { isTyping: true, roomId });
-    } else if (isTyping && !e.target.value && roomId) {
+      socket.emit("typing", { isTyping: true, roomId: roomIdRef.current });
+    } else if (isTyping && !e.target.value && roomIdRef.current) {
       setIsTyping(false);
-      socket.emit("typing", { isTyping: false, roomId });
+      socket.emit("typing", { isTyping: false, roomId: roomIdRef.current });
     }
   };
 
@@ -315,7 +318,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
 
   const confirmReport = () => {
     const screenshot = mode === 'video' ? captureScreenshot() : null;
-    socket.emit("report_18plus", { roomId, screenshot });
+    socket.emit("report_18plus", { roomId: roomIdRef.current, screenshot });
     setMessages(prev => [...prev, { id: "sys-report", text: "User reported. Thank you for keeping Addagle safe.", sender: "me", timestamp: new Date().toISOString() }]);
     setShowReportModal(false);
     cleanup();
