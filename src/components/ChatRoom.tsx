@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, FormEvent, ChangeEvent } from "react";
 import { Socket } from "socket.io-client";
 import { Video, Mic, MicOff, VideoOff, Send, X, SkipForward, Download, AlertTriangle, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { ConfirmModal } from "./ConfirmModal";
 
 interface ChatRoomProps {
   socket: Socket;
@@ -17,7 +18,7 @@ interface Message {
   timestamp: string;
 }
 
-export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
+export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
   const [status, setStatus] = useState<"connecting" | "waiting" | "matched">("connecting");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -115,6 +116,11 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
       findMatch();
     });
 
+    socket.on("banned_warning", () => {
+      alert("You have been disconnected and reported for violating terms of service.");
+      window.location.reload();
+    });
+
     // WebRTC Signaling
     socket.on("offer", async (offer) => {
       if (!peerConnectionRef.current) return;
@@ -145,6 +151,7 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
       socket.off("partner_typing");
       socket.off("partner_left");
       socket.off("skipped");
+      socket.off("banned_warning");
       socket.off("offer");
       socket.off("answer");
       socket.off("ice_candidate");
@@ -251,12 +258,22 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
     URL.revokeObjectURL(url);
   };
 
-  const reportUser = () => {
-    setShowReportModal(true);
+  const captureScreenshot = () => {
+    if (!remoteVideoRef.current) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = remoteVideoRef.current.videoWidth || 640;
+    canvas.height = remoteVideoRef.current.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(remoteVideoRef.current, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', 0.5);
+    }
+    return null;
   };
 
   const confirmReport = () => {
-    socket.emit("report_user", { roomId });
+    const screenshot = mode === 'video' ? captureScreenshot() : null;
+    socket.emit("report_18plus", { roomId, screenshot });
     setMessages(prev => [...prev, { id: "sys-report", text: "User reported. Thank you for keeping Addagle safe.", sender: "me", timestamp: new Date().toISOString() }]);
     setShowReportModal(false);
     cleanup();
@@ -269,6 +286,13 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-zinc-100">
+      <ConfirmModal
+        isOpen={showReportModal}
+        title="Report User"
+        message="Are you sure you want to report this user for 18+ content? A screenshot of their video will be sent to our moderation team."
+        onConfirm={confirmReport}
+        onCancel={() => setShowReportModal(false)}
+      />
       {/* Header */}
       <header className="h-16 border-b border-zinc-800 flex items-center justify-between px-6 bg-zinc-900/50 backdrop-blur-md z-10">
         <div className="flex items-center gap-4">
@@ -291,8 +315,8 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
                 <Download className="w-5 h-5" />
               </button>
               <button
-                onClick={reportUser}
-                title="Report User"
+                onClick={() => setShowReportModal(true)}
+                title="Report 18+"
                 className="p-2 text-zinc-400 hover:text-red-400 hover:bg-zinc-800 rounded-xl transition-colors"
               >
                 <AlertTriangle className="w-5 h-5" />
@@ -320,46 +344,6 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
 
       {/* Main Content */}
       <div className={`flex-1 flex ${mode === "video" ? "flex-col md:flex-row" : "flex-col"} overflow-hidden`}>
-        {/* Report Modal */}
-        <AnimatePresence>
-          {showReportModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-            >
-              <motion.div
-                initial={{ scale: 0.95 }}
-                animate={{ scale: 1 }}
-                exit={{ scale: 0.95 }}
-                className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-6"
-              >
-                <div className="flex items-center gap-3 text-red-400">
-                  <AlertTriangle className="w-6 h-6" />
-                  <h2 className="text-xl font-semibold">Report User</h2>
-                </div>
-                <p className="text-zinc-400 text-sm">
-                  Are you sure you want to report this user? They will be disconnected and reviewed by our moderation team.
-                </p>
-                <div className="flex gap-3 justify-end">
-                  <button
-                    onClick={() => setShowReportModal(false)}
-                    className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={confirmReport}
-                    className="px-4 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white font-medium transition-colors"
-                  >
-                    Report & Skip
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
         {/* Video Section */}
         {mode === "video" && (
           <div className="flex-1 bg-black relative flex flex-col p-4 gap-4">
@@ -369,6 +353,7 @@ export default function ChatRoom({ socket, mode, interests, onExit }: ChatRoomPr
                   ref={remoteVideoRef}
                   autoPlay
                   playsInline
+                  crossOrigin="anonymous"
                   className="w-full h-full object-cover"
                 />
               ) : (

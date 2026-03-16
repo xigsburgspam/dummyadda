@@ -5,7 +5,41 @@ import { Server, Socket } from "socket.io";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import rateLimit from "express-rate-limit";
+import mongoose from "mongoose";
 
+// --- MongoDB Setup ---
+const reportSchema = new mongoose.Schema({
+  screenshot: String,
+  reportedIp: String,
+  reporterId: String,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const bannedIpSchema = new mongoose.Schema({
+  ip: String,
+  reason: String,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const Report = mongoose.model('Report', reportSchema);
+const BannedIP = mongoose.model('BannedIP', bannedIpSchema);
+
+let useMongo = false;
+async function connectDB() {
+  if (process.env.MONGODB_URI) {
+    try {
+      await mongoose.connect(process.env.MONGODB_URI);
+      console.log('Connected to MongoDB');
+      useMongo = true;
+    } catch (err) {
+      console.error('MongoDB connection error:', err);
+    }
+  } else {
+    console.warn('No MONGODB_URI provided. Using in-memory fallback for preview.');
+  }
+}
+
+// --- Types ---
 interface User {
   id: string;
   socket: Socket;
@@ -19,22 +53,18 @@ interface Room {
   users: [User, User];
 }
 
-interface Report {
-  id: string;
-  screenshot: string;
-  ip: string;
-  timestamp: string;
-}
-
 async function startServer() {
+  await connectDB();
+
   const app = express();
   const PORT = 3000;
   
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '10mb' }));
 
-  const bannedIPs = new Set<string>();
-  const reports: Report[] = [];
+  // In-memory fallbacks
+  const memoryBannedIPs = new Set<string>();
+  const memoryReports: any[] = [];
 
   const getReqIp = (req: express.Request) => {
     const forwarded = req.headers['x-forwarded-for'];
@@ -48,8 +78,16 @@ async function startServer() {
     return socket.handshake.address || 'unknown';
   };
 
-  app.use((req, res, next) => {
-    if (bannedIPs.has(getReqIp(req))) {
+  const isIpBanned = async (ip: string) => {
+    if (useMongo) {
+      const ban = await BannedIP.findOne({ ip });
+      return !!ban;
+    }
+    return memoryBannedIPs.has(ip);
+  };
+
+  app.use(async (req, res, next) => {
+    if (await isIpBanned(getReqIp(req))) {
       return res.status(403).send("Your IP has been banned.");
     }
     next();
@@ -69,8 +107,8 @@ async function startServer() {
     maxHttpBufferSize: 1e8 // 100MB for screenshots
   });
 
-  io.use((socket, next) => {
-    if (bannedIPs.has(getSocketIp(socket))) {
+  io.use(async (socket, next) => {
+    if (await isIpBanned(getSocketIp(socket))) {
       return next(new Error("Banned"));
     }
     next();
@@ -140,17 +178,24 @@ async function startServer() {
       socket.emit("skipped");
     });
 
-    socket.on("report_18plus", (data: { roomId: string, screenshot: string }) => {
+    socket.on("report_18plus", async (data: { roomId: string, screenshot: string }) => {
       const room = activeRooms.get(data.roomId);
       if (room) {
         const partner = room.users.find(u => u.id !== socket.id);
         if (partner) {
-          reports.push({
-            id: uuidv4(),
+          const reportData = {
             screenshot: data.screenshot,
-            ip: partner.ip,
-            timestamp: new Date().toISOString()
-          });
+            reportedIp: partner.ip,
+            reporterId: socket.id,
+            timestamp: new Date()
+          };
+          
+          if (useMongo) {
+            await new Report(reportData).save();
+          } else {
+            memoryReports.push({ _id: uuidv4(), ...reportData });
+          }
+          
           console.log(`User ${socket.id} reported partner ${partner.id} (IP: ${partner.ip}) for 18+`);
           
           // Disconnect partner
@@ -183,37 +228,72 @@ async function startServer() {
     }
   });
 
-  // Admin API
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", activeUsers: waitingUsers.size + activeRooms.size * 2 });
-  });
+  // --- Admin API ---
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-  app.get("/api/admin/stats", (req, res) => {
-    res.json({
-      activeUsers: waitingUsers.size + activeRooms.size * 2,
-      waitingUsers: waitingUsers.size,
-      activeRooms: activeRooms.size,
-      recentReports: reports.slice(-10).map(r => ({ id: r.id, user: r.ip, reason: "18+ Report", date: r.timestamp }))
-    });
-  });
-
-  app.post("/api/xigadmin/reports", (req, res) => {
-    const { username, password } = req.body;
-    if (username === "xigy" && password === "xigymigy") {
-      res.json({ reports, bannedIPs: Array.from(bannedIPs) });
+  const authMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.split(' ')[1] === ADMIN_PASSWORD) {
+      next();
     } else {
       res.status(401).json({ error: "Unauthorized" });
     }
-  });
+  };
 
-  app.post("/api/xigadmin/ban", (req, res) => {
-    const { username, password, ip } = req.body;
-    if (username === "xigy" && password === "xigymigy") {
-      bannedIPs.add(ip);
+  app.post("/api/admin/login", (req, res) => {
+    const { password } = req.body;
+    if (password === ADMIN_PASSWORD) {
       res.json({ success: true });
     } else {
       res.status(401).json({ error: "Unauthorized" });
     }
+  });
+
+  app.get("/api/admin/data", authMiddleware, async (req, res) => {
+    const reports = useMongo ? await Report.find().sort({ timestamp: -1 }).limit(50) : memoryReports.slice(-50).reverse();
+    const bannedIPs = useMongo ? await BannedIP.find().sort({ timestamp: -1 }) : Array.from(memoryBannedIPs).map(ip => ({ _id: ip, ip, reason: 'Manual Ban', timestamp: new Date() }));
+    
+    res.json({
+      stats: {
+        activeUsers: waitingUsers.size + activeRooms.size * 2,
+        waitingUsers: waitingUsers.size,
+        activeRooms: activeRooms.size,
+        totalReports: useMongo ? await Report.countDocuments() : memoryReports.length
+      },
+      reports,
+      bannedIPs
+    });
+  });
+
+  app.post("/api/admin/ban", authMiddleware, async (req, res) => {
+    const { ip, reason } = req.body;
+    if (useMongo) {
+      await new BannedIP({ ip, reason }).save();
+    } else {
+      memoryBannedIPs.add(ip);
+    }
+    
+    // Disconnect any active users with this IP
+    for (const [id, user] of waitingUsers.entries()) {
+      if (user.ip === ip) user.socket.disconnect(true);
+    }
+    for (const [id, room] of activeRooms.entries()) {
+      room.users.forEach(u => {
+        if (u.ip === ip) u.socket.disconnect(true);
+      });
+    }
+    
+    res.json({ success: true });
+  });
+
+  app.delete("/api/admin/reports/:id", authMiddleware, async (req, res) => {
+    if (useMongo) {
+      await Report.findByIdAndDelete(req.params.id);
+    } else {
+      const idx = memoryReports.findIndex(r => r._id === req.params.id);
+      if (idx > -1) memoryReports.splice(idx, 1);
+    }
+    res.json({ success: true });
   });
 
   if (process.env.NODE_ENV !== "production") {
