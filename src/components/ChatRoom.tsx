@@ -36,6 +36,9 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const isInitiatorRef = useRef(false);
+  const partnerReadyRef = useRef(false);
+  const iceCandidateQueue = useRef<RTCIceCandidateInit[]>([]);
 
   // Initialize matching
   useEffect(() => {
@@ -76,6 +79,9 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
     socket.on("match_found", async (data: { roomId: string; partnerId: string; initiator: boolean }) => {
       setStatus("matched");
       setRoomId(data.roomId);
+      isInitiatorRef.current = data.initiator;
+      partnerReadyRef.current = false;
+      iceCandidateQueue.current = [];
       setMessages([{
         id: "sys-match",
         text: "You're now chatting with a random stranger. Say hi!",
@@ -84,7 +90,7 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
       }]);
 
       if (mode === "video") {
-        await setupWebRTC(data.roomId, data.initiator);
+        await setupWebRTC(data.roomId);
       }
     });
 
@@ -122,25 +128,44 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
     });
 
     // WebRTC Signaling
+    socket.on("webrtc_ready", async () => {
+      partnerReadyRef.current = true;
+      if (isInitiatorRef.current && peerConnectionRef.current) {
+        try {
+          const offer = await peerConnectionRef.current.createOffer();
+          await peerConnectionRef.current.setLocalDescription(offer);
+          socket.emit("offer", { offer, roomId });
+        } catch (e) {
+          console.error("Error creating offer", e);
+        }
+      }
+    });
+
     socket.on("offer", async (offer) => {
       if (!peerConnectionRef.current) return;
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
       socket.emit("answer", { answer, roomId });
+      processIceQueue();
     });
 
     socket.on("answer", async (answer) => {
       if (!peerConnectionRef.current) return;
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      processIceQueue();
     });
 
     socket.on("ice_candidate", async (candidate) => {
       if (!peerConnectionRef.current) return;
-      try {
-        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (e) {
-        console.error("Error adding received ice candidate", e);
+      if (!peerConnectionRef.current.remoteDescription) {
+        iceCandidateQueue.current.push(candidate);
+      } else {
+        try {
+          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error("Error adding received ice candidate", e);
+        }
       }
     });
 
@@ -152,14 +177,29 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
       socket.off("partner_left");
       socket.off("skipped");
       socket.off("banned_warning");
+      socket.off("webrtc_ready");
       socket.off("offer");
       socket.off("answer");
       socket.off("ice_candidate");
     };
   }, [socket, mode, roomId]);
 
+  const processIceQueue = async () => {
+    if (!peerConnectionRef.current || !peerConnectionRef.current.remoteDescription) return;
+    while (iceCandidateQueue.current.length > 0) {
+      const candidate = iceCandidateQueue.current.shift();
+      if (candidate) {
+        try {
+          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error("Error adding queued ice candidate", e);
+        }
+      }
+    }
+  };
+
   // WebRTC Setup
-  const setupWebRTC = async (currentRoomId: string, initiator: boolean) => {
+  const setupWebRTC = async (currentRoomId: string) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setLocalStream(stream);
@@ -187,7 +227,9 @@ export function ChatRoom({ socket, mode, interests, onExit }: ChatRoomProps) {
         }
       };
 
-      if (initiator) {
+      socket.emit("webrtc_ready", { roomId: currentRoomId });
+
+      if (isInitiatorRef.current && partnerReadyRef.current) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         socket.emit("offer", { offer, roomId: currentRoomId });

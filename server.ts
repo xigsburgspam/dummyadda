@@ -164,6 +164,7 @@ async function startServer() {
     socket.on("offer", (data) => socket.to(data.roomId).emit("offer", data.offer));
     socket.on("answer", (data) => socket.to(data.roomId).emit("answer", data.answer));
     socket.on("ice_candidate", (data) => socket.to(data.roomId).emit("ice_candidate", data.candidate));
+    socket.on("webrtc_ready", (data) => socket.to(data.roomId).emit("webrtc_ready"));
     socket.on("send_message", (data) => {
       socket.to(data.roomId).emit("receive_message", {
         message: data.message,
