@@ -1,0 +1,8 @@
+{
+  "name": "Addagle",
+  "description": "A modern anonymous random chat platform with text and video.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
